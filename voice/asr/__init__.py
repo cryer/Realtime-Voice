@@ -10,8 +10,10 @@ def create_asr(cfg: dict) -> ASR:
     if name in (None, "mock"):
         from voice.asr.mock import MockASR
         return MockASR(**(cfg.get("mock", {}).get("asr", {})))
-    # 真实 provider 在此注册，例如：
-    # if name == "deepgram":
-    #     from voice.asr.deepgram import DeepgramASR
-    #     return DeepgramASR(...)
+    if name == "deepgram":
+        from voice.asr.deepgram import DeepgramASR
+        return DeepgramASR(**cfg.get("deepgram", {}))
+    if name == "volcengine":
+        from voice.asr.volcengine import VolcengineASR
+        return VolcengineASR(**cfg.get("volcengine_asr", {}))
     raise ValueError(f"unknown ASR provider: {name!r}")

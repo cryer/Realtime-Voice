@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
+from dotenv import load_dotenv
+
 from voice.asr import create_asr
 from voice.llm import create_llm
 from voice.llm.splitter import split_sentences
@@ -36,16 +38,17 @@ async def run_turn(frames: AsyncIterator[bytes], *, sink: MetricsSink,
     取消语义：外层 cancel，gen_id 作废由消费侧保证。"""
 
     # --- ASR ---
+    # provider 可能一句话出多个 final（Deepgram 按分句），拼接所有 final；
+    # t_asr_final 取最后一个 final 的时刻（完整文本就绪）
     latest_partial = None
-    final_text = None
+    finals: list[str] = []
     async for ev in asr.stream(frames):
         if ev.kind == "partial":
             latest_partial = ev.text
         elif ev.kind == "final":
-            final_text = ev.text
+            finals.append(ev.text)
             ts["t_asr_final"] = time.monotonic()
-            break
-    text = final_text or latest_partial or ""
+    text = "".join(finals) if finals else (latest_partial or "")
     print(f"[turn {turn_id}] ASR: {text!r}")
     if not text:
         return ts
@@ -128,6 +131,7 @@ async def run_file_mode(args, cfg, sink) -> None:
             _print_turn_waterfall(ts)
     finally:
         player.close()
+        await _close_providers(asr, llm, tts)
 
 
 async def run_mic_mode(args, cfg, sink) -> None:
@@ -180,6 +184,17 @@ async def run_mic_mode(args, cfg, sink) -> None:
     finally:
         task.cancel()
         player.close()
+        await _close_providers(asr, llm, tts)
+
+
+async def _close_providers(*providers) -> None:
+    for p in providers:
+        close = getattr(p, "close", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:
+                pass
 
 
 def _make_player(args):
@@ -198,6 +213,10 @@ def _make_player(args):
 async def amain(args) -> None:
     with open(args.config, encoding="utf-8") as fh:
         cfg = json.load(fh)
+    for slot in ("asr", "llm", "tts"):
+        override = getattr(args, slot)
+        if override:
+            cfg.setdefault("providers", {})[slot] = override
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     jsonl_path = Path(args.out) / f"m1_{stamp}.jsonl"
     with MetricsSink(jsonl_path) as sink:
@@ -212,12 +231,16 @@ async def amain(args) -> None:
 
 
 def main(argv=None) -> int:
+    load_dotenv()
     ap = argparse.ArgumentParser(prog="python -m voice.ptt")
     ap.add_argument("--file", help="用 wav 文件模拟一轮按键说话")
     ap.add_argument("--turns", type=int, default=1)
     ap.add_argument("--no-play", action="store_true", help="不出声，TTS 音频落盘")
     ap.add_argument("--config", default="configs/default.json")
     ap.add_argument("--out", default="reports")
+    ap.add_argument("--asr", help="覆盖 config 的 ASR provider（如 mock / deepgram / volcengine）")
+    ap.add_argument("--llm", help="覆盖 config 的 LLM provider（如 mock / kimi）")
+    ap.add_argument("--tts", help="覆盖 config 的 TTS provider（如 mock / volcengine）")
     args = ap.parse_args(argv)
     try:
         asyncio.run(amain(args))

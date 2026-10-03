@@ -10,4 +10,7 @@ def create_llm(cfg: dict) -> LLM:
     if name in (None, "mock"):
         from voice.llm.mock import MockLLM
         return MockLLM(**(cfg.get("mock", {}).get("llm", {})))
+    if name == "kimi":
+        from voice.llm.kimi import KimiLLM
+        return KimiLLM(**cfg.get("kimi", {}))
     raise ValueError(f"unknown LLM provider: {name!r}")

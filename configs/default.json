@@ -20,9 +20,21 @@
     "min_speech_ms": 96
   },
   "providers": {
-    "asr": "mock",
-    "llm": "mock",
-    "tts": "mock"
+    "asr": "deepgram",
+    "llm": "kimi",
+    "tts": "volcengine"
+  },
+  "deepgram": {
+    "model": "nova-2",
+    "language": "zh-CN"
+  },
+  "kimi": {
+    "model": "kimi-for-coding-highspeed",
+    "reasoning_effort": "low"
+  },
+  "volcengine": {
+    "speaker": "zh_female_vv_uranus_bigtts",
+    "resource_id": "seed-tts-2.0"
   },
   "mock": {
     "asr": {"final_ms": 120},

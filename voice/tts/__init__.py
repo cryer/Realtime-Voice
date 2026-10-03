@@ -10,4 +10,7 @@ def create_tts(cfg: dict) -> TTS:
     if name in (None, "mock"):
         from voice.tts.mock import MockTTS
         return MockTTS(**(cfg.get("mock", {}).get("tts", {})))
+    if name == "volcengine":
+        from voice.tts.volcengine import VolcengineTTS
+        return VolcengineTTS(**cfg.get("volcengine", {}))
     raise ValueError(f"unknown TTS provider: {name!r}")
