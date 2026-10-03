@@ -5,3 +5,4 @@ models/*.onnx
 models/sherpa-asr-bilingual-zh-en/
 models/vits-zh-hf-fanchen-C/
 reports/
+.tools/

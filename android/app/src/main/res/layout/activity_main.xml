@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <com.voiceagent.app.WaveView
+        android:id="@+id/wave"
+        android:layout_width="340dp"
+        android:layout_height="340dp"
+        android:layout_gravity="center" />
+
+    <ImageButton
+        android:id="@+id/btnCall"
+        android:layout_width="88dp"
+        android:layout_height="88dp"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:contentDescription="@string/call"
+        android:elevation="8dp"
+        android:scaleType="center"
+        android:src="@drawable/ic_phone" />
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="22dp"
+        android:layout_marginEnd="24dp"
+        android:orientation="vertical">
+
+        <com.voiceagent.app.ProviderSwitch
+            android:id="@+id/swAsr"
+            android:layout_width="200dp"
+            android:layout_height="34dp"
+            android:layout_marginBottom="10dp" />
+
+        <com.voiceagent.app.ProviderSwitch
+            android:id="@+id/swTts"
+            android:layout_width="200dp"
+            android:layout_height="34dp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/btnSettings"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="top|start"
+        android:layout_margin="16dp"
+        android:gravity="center"
+        android:text="⚙"
+        android:textColor="#80FFFFFF"
+        android:textSize="20sp" />
+</FrameLayout>
