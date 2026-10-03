@@ -36,6 +36,10 @@ class Player:
         self._pending_first = False
         self._done: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # M3 泄露检测：stale chunk 一律丢弃并计数；flush 清除量累计
+        self.dropped_stale_chunks = 0
+        self.dropped_stale_bytes = 0
+        self.flushed_bytes = 0
 
         import sounddevice as sd
 
@@ -82,6 +86,8 @@ class Player:
     async def feed_chunk(self, chunk: AudioChunk) -> bool:
         """返回 False 表示 gen 已作废，chunk 被丢弃。"""
         if chunk.gen_id != self._gen:
+            self.dropped_stale_chunks += 1
+            self.dropped_stale_bytes += len(chunk.pcm)
             return False
         with self._lock:
             self._buf.extend(chunk.pcm)
@@ -96,6 +102,7 @@ class Player:
     def flush(self) -> None:
         """barge-in：立即静音，作废当前 gen。"""
         with self._lock:
+            self.flushed_bytes += len(self._buf)
             self._buf.clear()
             self._gen = -1
             self._eos = False
@@ -111,13 +118,23 @@ class Player:
     def first_audio_time(self, gen_id: int) -> float | None:
         return self._first_audio_t
 
+    def stats(self) -> dict:
+        return {"dropped_stale_chunks": self.dropped_stale_chunks,
+                "dropped_stale_bytes": self.dropped_stale_bytes,
+                "flushed_bytes": self.flushed_bytes}
+
     def close(self) -> None:
         self._stream.stop()
         self._stream.close()
 
 
 class NullPlayer:
-    """无声卡环境：按真实速率模拟播放，音频落盘 wav。接口与 Player 相同。"""
+    """无声卡环境：按真实速率模拟播放，音频落盘 wav。接口与 Player 相同。
+
+    保真模型（M3 起）：feed 进来的 chunk 进内存缓冲，只有"播放时刻已到"的
+    部分才写入 wav（= 真实 DAC 已出声的部分）；flush 丢弃未播缓冲并计数——
+    这样 tts_out.wav 精确等于用户实际听到的音频，barge-in 泄露可验证。
+    """
 
     def __init__(self, out_path: str | Path = "reports/recordings/tts_out.wav",
                  prebuffer_ms: int = 32):
@@ -127,13 +144,18 @@ class NullPlayer:
         self._gen = -1
         self._first_audio_t: float | None = None
         self._gen_start_t = 0.0
-        self._gen_bytes = 0
+        self._played_bytes = 0        # 当前 gen 已"播出"（已写 wav）的字节数
+        self._buf = bytearray()       # 已 feed 未到播放时刻的部分
         self._wf: wave.Wave_write | None = None
+        self.dropped_stale_chunks = 0
+        self.dropped_stale_bytes = 0
+        self.flushed_bytes = 0
 
     def start_gen(self, gen_id: int) -> None:
         self._gen = gen_id
         self._gen_start_t = time.monotonic()
-        self._gen_bytes = 0
+        self._played_bytes = 0
+        self._buf.clear()
         self._first_audio_t = None
         if self._wf is None:
             self._wf = wave.open(str(self.out_path), "wb")
@@ -141,31 +163,53 @@ class NullPlayer:
             self._wf.setsampwidth(2)
             self._wf.setframerate(SAMPLE_RATE)
 
+    def _drain_played(self) -> None:
+        """把缓冲中播放时刻已到的部分写入 wav。"""
+        playable = int((time.monotonic() - self._gen_start_t - self.prebuffer_s)
+                       * SAMPLE_RATE * 2) - self._played_bytes
+        take = max(0, min(playable, len(self._buf)))
+        if take:
+            self._wf.writeframes(bytes(self._buf[:take]))
+            del self._buf[:take]
+            self._played_bytes += take
+
     async def feed_chunk(self, chunk: AudioChunk) -> bool:
         if chunk.gen_id != self._gen:
+            self.dropped_stale_chunks += 1
+            self.dropped_stale_bytes += len(chunk.pcm)
             return False
         if self._first_audio_t is None:
             self._first_audio_t = time.monotonic() + self.prebuffer_s
-        self._wf.writeframes(chunk.pcm)
-        self._gen_bytes += len(chunk.pcm)
+        self._buf.extend(chunk.pcm)
+        self._drain_played()
         return True
 
     def end_gen(self) -> None:
         pass
 
     def flush(self) -> None:
+        self.flushed_bytes += len(self._buf)
+        self._buf.clear()
         self._gen = -1
 
     async def wait_done(self, gen_id: int) -> None:
         if gen_id != self._gen:
             return
-        total_s = self._gen_bytes / (SAMPLE_RATE * 2)
+        total_s = (self._played_bytes + len(self._buf)) / (SAMPLE_RATE * 2)
         remaining = self._gen_start_t + self.prebuffer_s + total_s - time.monotonic()
         if remaining > 0:
             await asyncio.sleep(remaining)
+        if gen_id != self._gen:  # sleep 期间被 flush（防御；正常路径是 task 被取消）
+            return
+        self._drain_played()
 
     def first_audio_time(self, gen_id: int) -> float | None:
         return self._first_audio_t
+
+    def stats(self) -> dict:
+        return {"dropped_stale_chunks": self.dropped_stale_chunks,
+                "dropped_stale_bytes": self.dropped_stale_bytes,
+                "flushed_bytes": self.flushed_bytes}
 
     def close(self) -> None:
         if self._wf is not None:

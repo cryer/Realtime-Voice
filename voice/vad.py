@@ -52,6 +52,11 @@ class SileroVAD:
         self._speech_start_ms = 0    # 语音段起点（含未确认阶段回推）
         self.last_prob = 0.0         # 最近一窗的语音概率（barge-in 逐帧确认用）
 
+    @property
+    def now_ms(self) -> int:
+        """已处理音频的毫秒数（VAD 时间轴上的"现在"）。"""
+        return self._samples_seen * 1000 // 16000
+
     def _infer(self, frame: bytes) -> float:
         audio = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
         audio = audio.reshape(1, -1)

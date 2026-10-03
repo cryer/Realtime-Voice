@@ -17,10 +17,11 @@ JSONL 格式（定稿，每行一个 JSON 对象）：
 
     {"type": "vad_event", "kind": "speech_start"|"speech_end", "t_ms": 1234, "prob": 0.87}
 
-3. barge-in 事件::
+3. barge-in 事件（`mute_ms` = 用户真实开口（VAD 回推起点）→ player.flush()）::
 
     {"type": "barge_in", "turn_id": 1, "gen_id": 1, "t_ms": 15000,
-     "cancelled": {"llm": true, "tts": true, "playback_flushed": true}}
+     "cancelled": {"llm": true, "tts": true, "playback_flushed": true},
+     "mute_ms": 320}
 
 用法：
     python -m voice.metrics report <session.jsonl> [--budget configs/default.json]
@@ -82,9 +83,10 @@ class MetricsSink:
             rec["prob"] = round(prob, 3)
         self.emit(rec)
 
-    def barge_in(self, turn_id: int, gen_id: int, t_ms: int, cancelled: dict) -> None:
+    def barge_in(self, turn_id: int, gen_id: int, t_ms: int, cancelled: dict,
+                 **extra) -> None:
         self.emit({"type": "barge_in", "turn_id": turn_id, "gen_id": gen_id,
-                   "t_ms": t_ms, "cancelled": cancelled})
+                   "t_ms": t_ms, "cancelled": cancelled, **extra})
 
     def close(self) -> None:
         self._fh.close()
@@ -150,6 +152,14 @@ def render_report(turns: list[dict], barge_ins: list[dict], budget: dict) -> str
     interrupted = sum(1 for t in turns if t.get("interrupted"))
     if interrupted:
         lines.append(f"interrupted turns: {interrupted}")
+    mute_vals = [b["mute_ms"] for b in barge_ins
+                 if isinstance(b.get("mute_ms"), (int, float))]
+    st = _stats(mute_vals)
+    if st:
+        # 口径：用户真实开口（VAD 回推起点，含 ~96ms VAD 确认）→ player.flush()
+        ok = "OK" if st["p95"] <= 400 else "OVER p95>400"
+        lines.append(f"barge-in 开口→静音: p50={st['p50']:.0f}ms p95={st['p95']:.0f}ms"
+                     f"（验收窗 200–400ms）{ok}")
     lines.append("")
     header = f"{'segment':<20}{'budget':>8}{'p50':>9}{'p95':>9}{'p99':>9}{'mean':>9}  status"
     lines.append(header)

@@ -78,6 +78,7 @@ class TurnManager:
         self._ts: dict = {}
         self._candidate = False            # AGENT_SPEAKING 中的 barge-in 候选
         self._candidate_run_ms = 0
+        self._candidate_t0: float | None = None  # 候选语音的真实开口时刻（monotonic）
         self._pipeline_task: asyncio.Task | None = None
         self._pipeline_interrupted = False  # cancel 原因：True=barge-in，False=用户重说
         self._stashed: tuple[str, float] | None = None  # 被中止回合的文本（拼下一句）
@@ -123,11 +124,11 @@ class TurnManager:
         if self.sink is not None:
             self.sink.vad_event(ev.kind, ev.t_ms, ev.prob)
         if ev.kind == "speech_start":
-            await self._on_speech_start()
+            await self._on_speech_start(ev)
         else:
             await self._on_speech_end()
 
-    async def _on_speech_start(self) -> None:
+    async def _on_speech_start(self, ev: VADEvent) -> None:
         now = time.monotonic()
         if self.state == IDLE:
             self._start_capture()
@@ -137,6 +138,8 @@ class TurnManager:
             self._start_capture()
             self._candidate = True
             self._candidate_run_ms = 0
+            # ev.t_ms 已回推到语音真实起点；换算成 monotonic 时刻（含 VAD 确认延迟）
+            self._candidate_t0 = now - max(0, self.vad.now_ms - ev.t_ms) / 1000.0
         elif self.state == PROCESSING:
             # endpoint 切早了 / 用户补充：中止在途管线，文本 stash 拼到下一回合
             self._abort_pipeline()
@@ -148,6 +151,7 @@ class TurnManager:
         if self._candidate:
             # 确认窗前语音结束 → 咳嗽/噪音虚警，agent 继续说完
             self._candidate = False
+            self._candidate_t0 = None
             self._cancel_capture()
             return
         if self.state != USER_SPEAKING:
@@ -181,11 +185,17 @@ class TurnManager:
         interrupted_gen = self._gen
         self._gen += 1  # 铁律：作废旧 gen，迟到 token/chunk 全部丢弃
         self.player.flush()
+        mute_ms = None
+        if self._candidate_t0 is not None:
+            mute_ms = round((now - self._candidate_t0) * 1000)
+        self._candidate_t0 = None
         if self.sink is not None:
             self.sink.barge_in(self.turn_id, interrupted_gen, int(now * 1000),
                                cancelled={"llm": True, "tts": True,
-                                          "playback_flushed": True})
-        print(f"[barge-in] turn {self.turn_id} gen {interrupted_gen} 作废，开始聆听")
+                                          "playback_flushed": True},
+                               mute_ms=mute_ms)
+        print(f"[barge-in] turn {self.turn_id} gen {interrupted_gen} 作废，开始聆听"
+              f"（开口→静音 {mute_ms}ms）")
         if self._pipeline_task is not None and not self._pipeline_task.done():
             self._pipeline_interrupted = True
             self._pipeline_task.cancel()
@@ -330,6 +340,7 @@ class TurnManager:
                 if self._candidate:
                     # 播放收尾期间起的候选直接转正为新回合
                     self._candidate = False
+                    self._candidate_t0 = None
                     self._begin_user_turn(time.monotonic())
                 else:
                     self._set_state(IDLE)

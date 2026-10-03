@@ -88,6 +88,12 @@ async def amain(args) -> None:
         await _close_providers(asr, llm, tts)
 
     print(f"[M2] 会话落盘 {jsonl_path}")
+    stats_fn = getattr(player, "stats", None)
+    if stats_fn is not None:
+        st = stats_fn()
+        print(f"[泄露检查] 迟到 stale chunk 丢弃 {st['dropped_stale_chunks']} 个"
+              f"（{st['dropped_stale_bytes']}B，全部未播）；"
+              f"flush 清除未播 {st['flushed_bytes']}B")
     turns, _, barge_ins = load_records(jsonl_path)
     if turns:
         print(render_report(turns, barge_ins, cfg.get("budget_ms", {})))
