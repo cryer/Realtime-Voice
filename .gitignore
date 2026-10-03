@@ -1,4 +1,7 @@
 .env
+AGENTS.md
+TECH_REPORT.md
+*.pid
 __pycache__/
 *.pyc
 models/*.onnx

@@ -9,7 +9,14 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat $PID_FILE)" 2>/dev/null; then
     exit 0
 fi
 
-source "$HOME/miniforge-host/etc/profile.d/conda.sh"
+# 激活 conda 环境（按常见安装路径探测，都不匹配则回退到 PATH 上的 conda）
+for d in "$HOME/miniforge-host" "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/anaconda3" /opt/conda; do
+    if [ -f "$d/etc/profile.d/conda.sh" ]; then
+        source "$d/etc/profile.d/conda.sh"
+        break
+    fi
+done
+command -v conda >/dev/null 2>&1 || source "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh"
 conda activate py310
 mkdir -p reports
 

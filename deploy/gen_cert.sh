@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 生成自签 HTTPS 证书（手机浏览器调用麦克风必须 HTTPS）。
-# 用法: ./gen_cert.sh <服务器IP>   例如: ./gen_cert.sh <server-ip>
+# 用法: ./gen_cert.sh <服务器IP>  
 set -e
 cd "$(dirname "$0")/.."
 IP=${1:?usage: ./gen_cert.sh <server-ip>}
