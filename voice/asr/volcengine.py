@@ -29,8 +29,8 @@ import websockets
 
 from voice.asr.base import TranscriptEvent
 
-DEFAULT_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
-DEFAULT_RESOURCE_ID = "volc.bigasr.sauc.duration"
+DEFAULT_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+DEFAULT_RESOURCE_ID = "volc.seedasr.sauc.duration"
 
 # message type
 FULL_CLIENT_REQUEST = 0b0001
@@ -88,11 +88,18 @@ def _parse_response(msg: bytes) -> tuple[str, int, object]:
 class VolcengineASR:
     def __init__(self, api_key: str | None = None,
                  resource_id: str = DEFAULT_RESOURCE_ID,
-                 base_url: str = DEFAULT_URL, packet_ms: int = 200):
+                 base_url: str = DEFAULT_URL, packet_ms: int = 200,
+                 end_window_size: int = 800, force_to_speech_time: int = 1000,
+                 enable_nonstream: bool = True):
         self.api_key = api_key or os.environ["VOLCENGINE_API_KEY"]
         self.resource_id = resource_id
         self.base_url = base_url
         self.packet_bytes = 16000 * 2 * packet_ms // 1000
+        # 实测（2026-10-03）：bigmodel_async + 二遍识别 + end_window_size=800 时，
+        # 我方 VAD 判停后负包 → final 仅 47~78ms；不加这些参数需等 ~5s 语义分句
+        self.end_window_size = end_window_size
+        self.force_to_speech_time = force_to_speech_time
+        self.enable_nonstream = enable_nonstream
 
     async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[TranscriptEvent]:
         headers = {
@@ -108,7 +115,10 @@ class VolcengineASR:
             "user": {"uid": "voice-agent"},
             "audio": {"format": "pcm", "rate": 16000, "bits": 16, "channel": 1},
             "request": {"model_name": "bigmodel", "enable_punc": True,
-                        "enable_itn": True, "show_utterances": True},
+                        "enable_itn": True, "show_utterances": True,
+                        "enable_nonstream": self.enable_nonstream,
+                        "end_window_size": self.end_window_size,
+                        "force_to_speech_time": self.force_to_speech_time},
         }
         await ws.send(_full_request(req))
 
@@ -126,6 +136,7 @@ class VolcengineASR:
 
         send_task = asyncio.create_task(sender())
         last_partial = ""
+        last_final = ""
         try:
             async for raw in ws:
                 kind, code, data = _parse_response(raw)
@@ -137,14 +148,18 @@ class VolcengineASR:
                 text = ((data.get("result") or {}).get("text") or "").strip()
                 definite = any(u.get("definite") for u in
                                (data.get("result") or {}).get("utterances") or [])
-                if text and (definite or code == FLAG_LAST_WITH_SEQ):
+                if code == FLAG_LAST_WITH_SEQ:
+                    # 流收尾：有未落定文本则补一个 final
+                    if text and text != last_final:
+                        yield TranscriptEvent("final", text, t_ms)
+                    break
+                if text and definite and text != last_final:
+                    last_final = text
                     yield TranscriptEvent("final", text, t_ms)
                 elif text and text != last_partial:
                     yield TranscriptEvent("partial", text, t_ms)
                 if text:
                     last_partial = text
-                if code == FLAG_LAST_WITH_SEQ:
-                    break
         finally:
             send_task.cancel()
             try:

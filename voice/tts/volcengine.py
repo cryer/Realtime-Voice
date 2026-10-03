@@ -64,7 +64,7 @@ class VolcengineTTS:
                             continue
                         msg = json.loads(line)
                         code = msg.get("code", 0)
-                        if code != 0:
+                        if code not in (0, 20000000):  # 0=数据包, 20000000=成功结束
                             raise RuntimeError(f"volcengine tts code={code}: {msg.get('message')}")
                         data = msg.get("data")
                         if data:

@@ -38,17 +38,17 @@ async def run_turn(frames: AsyncIterator[bytes], *, sink: MetricsSink,
     取消语义：外层 cancel，gen_id 作废由消费侧保证。"""
 
     # --- ASR ---
-    # provider 可能一句话出多个 final（Deepgram 按分句），拼接所有 final；
+    # final 语义为"截至目前的完整定稿文本"（见 asr/base.py），取最后一个即可；
     # t_asr_final 取最后一个 final 的时刻（完整文本就绪）
     latest_partial = None
-    finals: list[str] = []
+    latest_final = None
     async for ev in asr.stream(frames):
         if ev.kind == "partial":
             latest_partial = ev.text
         elif ev.kind == "final":
-            finals.append(ev.text)
+            latest_final = ev.text
             ts["t_asr_final"] = time.monotonic()
-    text = "".join(finals) if finals else (latest_partial or "")
+    text = latest_final or latest_partial or ""
     print(f"[turn {turn_id}] ASR: {text!r}")
     if not text:
         return ts

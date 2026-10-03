@@ -51,6 +51,8 @@ class DeepgramASR:
                 pass
 
         send_task = asyncio.create_task(sender())
+        acc: list[str] = []  # 已 final 的分句；final 事件统一为"截至目前的完整文本"语义
+        sep = "" if self.language.startswith("zh") else " "
         try:
             async for raw in ws:
                 msg = json.loads(raw)
@@ -61,8 +63,11 @@ class DeepgramASR:
                 if not text:
                     continue
                 t_ms = int(time.monotonic() * 1000)
-                kind = "final" if msg.get("is_final") else "partial"
-                yield TranscriptEvent(kind=kind, text=text, t_ms=t_ms)
+                if msg.get("is_final"):
+                    acc.append(text)
+                    yield TranscriptEvent("final", sep.join(acc), t_ms)
+                else:
+                    yield TranscriptEvent("partial", sep.join(acc + [text]), t_ms)
         finally:
             send_task.cancel()
             try:

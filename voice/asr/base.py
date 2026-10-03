@@ -11,6 +11,9 @@ from typing import AsyncIterator, Protocol
 
 @dataclass
 class TranscriptEvent:
+    """partial = 未定稿的实时文本；final = 截至目前的完整定稿文本（增量覆盖，非分句片段）。
+    消费方取最后一个 final 即全量文本。"""
+
     kind: str  # "partial" | "final"
     text: str
     t_ms: int  # time.monotonic() 毫秒

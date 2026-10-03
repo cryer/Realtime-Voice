@@ -20,13 +20,16 @@
     "min_speech_ms": 96
   },
   "providers": {
-    "asr": "deepgram",
+    "asr": "volcengine",
     "llm": "kimi",
     "tts": "volcengine"
   },
   "deepgram": {
     "model": "nova-2",
     "language": "zh-CN"
+  },
+  "volcengine_asr": {
+    "resource_id": "volc.seedasr.sauc.duration"
   },
   "kimi": {
     "model": "kimi-for-coding-highspeed",
