@@ -11,9 +11,6 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
     steps:
       - uses: actions/checkout@v4
 
@@ -25,14 +22,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build APK
+        working-directory: android
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Stage APK
-        working-directory: .
         run: cp android/app/build/outputs/apk/debug/app-debug.apk "Realtime-Voice-${{ github.ref_name }}.apk"
 
       - name: Publish GitHub Release
-        working-directory: .
         uses: softprops/action-gh-release@v2
         with:
           files: "Realtime-Voice-${{ github.ref_name }}.apk"
