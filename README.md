@@ -4,7 +4,9 @@
 
 不依赖任何全家桶语音框架（LiveKit Agents / pipecat 等），整条流式管线手写；ASR / LLM / TTS 全部面向接口编程，云端 API 与本地开源模型可**独立切换、实时生效**。
 
-![Android App](assets/app.jpg)
+<p align="center">
+  <img src="assets/app.jpg" width="280" alt="Android App 通话界面">
+</p>
 
 ## 特性
 
