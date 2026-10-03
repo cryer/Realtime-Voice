@@ -16,4 +16,7 @@ def create_asr(cfg: dict) -> ASR:
     if name == "volcengine":
         from voice.asr.volcengine import VolcengineASR
         return VolcengineASR(**cfg.get("volcengine_asr", {}))
+    if name == "sherpa":
+        from voice.asr.sherpa import SherpaOnnxASR
+        return SherpaOnnxASR(**cfg.get("sherpa_asr", {}))
     raise ValueError(f"unknown ASR provider: {name!r}")

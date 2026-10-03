@@ -21,16 +21,9 @@
     "min_speech_ms": 96
   },
   "providers": {
-    "asr": "volcengine",
+    "asr": "sherpa",
     "llm": "kimi",
-    "tts": "volcengine"
-  },
-  "deepgram": {
-    "model": "nova-2",
-    "language": "zh-CN"
-  },
-  "volcengine_asr": {
-    "resource_id": "volc.seedasr.sauc.duration"
+    "tts": "sherpa"
   },
   "sherpa_asr": {
     "provider": "cpu",
@@ -45,13 +38,11 @@
     "model": "kimi-for-coding-highspeed",
     "reasoning_effort": "low"
   },
+  "volcengine_asr": {
+    "resource_id": "volc.seedasr.sauc.duration"
+  },
   "volcengine": {
     "speaker": "zh_female_vv_uranus_bigtts",
     "resource_id": "seed-tts-2.0"
-  },
-  "mock": {
-    "asr": {"final_ms": 120},
-    "llm": {"first_token_ms": 180, "token_interval_ms": 25},
-    "tts": {"first_chunk_ms": 120}
   }
 }

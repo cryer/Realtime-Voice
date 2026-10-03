@@ -13,4 +13,7 @@ def create_tts(cfg: dict) -> TTS:
     if name == "volcengine":
         from voice.tts.volcengine import VolcengineTTS
         return VolcengineTTS(**cfg.get("volcengine", {}))
+    if name == "sherpa":
+        from voice.tts.sherpa import SherpaOnnxTTS
+        return SherpaOnnxTTS(**cfg.get("sherpa_tts", {}))
     raise ValueError(f"unknown TTS provider: {name!r}")
