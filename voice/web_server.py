@@ -47,6 +47,93 @@ def _make_vad(cfg: dict) -> SileroVAD:
                      min_speech_ms=vad_cfg.get("min_speech_ms", 96))
 
 
+# ---- provider 运行时切换（页面上"识别/合成 × 本地/云端"开关） ----
+#
+# TurnManager 每回合才调 asr.stream / tts.synth，代理对象在调用瞬间解析
+# 当前活动实例 → 切换下一回合即生效，通话不中断。provider 实例池化，
+# 本地模型首次切换时懒加载 + 预热（避免开机就加载两套栈）。
+
+CHOICES = {"asr": ("volcengine", "sherpa"), "tts": ("volcengine", "sherpa")}
+
+
+def _create_provider(cfg: dict, slot: str, name: str):
+    c = dict(cfg)
+    c["providers"] = dict(cfg.get("providers", {}))
+    c["providers"][slot] = name
+    return create_asr(c) if slot == "asr" else create_tts(c)
+
+
+async def _get_provider(app: web.Application, slot: str, name: str):
+    inst = app["pool"][slot].get(name)
+    if inst is None:
+        loop = asyncio.get_running_loop()
+        inst = await loop.run_in_executor(None, _create_provider,
+                                          app["cfg"], slot, name)
+        await _warm(slot, inst)
+        app["pool"][slot][name] = inst
+        print(f"[web] provider 上线：{slot}={name}")
+    return inst
+
+
+async def _warm(slot: str, inst) -> None:
+    warmup = getattr(inst, "warmup", None)
+    if warmup is None:
+        return
+    try:
+        if slot == "tts":
+            await warmup("嗯。")
+        else:
+            await warmup()
+    except Exception as e:
+        print(f"[warn] {slot} 预热失败：{e}")
+
+
+class _SlotProxy:
+    """按当前活动 provider 转发；只暴露 TurnManager 用到的方法。"""
+
+    def __init__(self, app: web.Application, slot: str):
+        self._app = app
+        self._slot = slot
+
+    def _active(self):
+        return self._app["pool"][self._slot][self._app["active"][self._slot]]
+
+    def stream(self, *args, **kwargs):      # asr
+        return self._active().stream(*args, **kwargs)
+
+    def synth(self, *args, **kwargs):       # tts
+        return self._active().synth(*args, **kwargs)
+
+
+async def api_get_providers(request: web.Request) -> web.Response:
+    app = request.app
+    return web.json_response({
+        slot: {"active": app["active"][slot], "choices": list(CHOICES[slot])}
+        for slot in CHOICES
+    })
+
+
+async def api_set_providers(request: web.Request) -> web.Response:
+    app = request.app
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    for slot, name in body.items():
+        if slot not in CHOICES or name not in CHOICES[slot]:
+            return web.json_response({"error": f"bad choice {slot}={name}"},
+                                     status=400)
+    try:
+        for slot, name in body.items():
+            await _get_provider(app, slot, name)   # 懒加载 + 预热，失败不切换
+            app["active"][slot] = name
+            print(f"[web] 切换：{slot} → {name}")
+    except Exception as e:
+        return web.json_response({"error": f"{type(e).__name__}: {e}"},
+                                 status=500)
+    return await api_get_providers(request)
+
+
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     app = request.app
     cfg = app["cfg"]
@@ -56,8 +143,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     print(f"[web] 拨入：{peer}")
 
     player = WsPlayer(ws)
-    tm = TurnManager(vad=_make_vad(cfg), asr=app["asr"], llm=app["llm"],
-                     tts=app["tts"], player=player, cfg=cfg,
+    tm = TurnManager(vad=_make_vad(cfg), asr=_SlotProxy(app, "asr"),
+                     llm=app["llm"], tts=_SlotProxy(app, "tts"),
+                     player=player, cfg=cfg,
                      system_prompt=cfg.get("system_prompt", SYSTEM_PROMPT))
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     jsonl_path = Path(app["out"]) / f"web_{stamp}.jsonl"
@@ -81,33 +169,23 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 async def on_startup(app: web.Application) -> None:
     cfg = app["cfg"]
-    app["asr"] = create_asr(cfg)
-    app["llm"] = create_llm(cfg)
-    app["tts"] = create_tts(cfg)
     prov = cfg.get("providers", {})
-    print(f"[web] providers: asr={prov.get('asr')} llm={prov.get('llm')} "
-          f"tts={prov.get('tts')}")
-    # TTS 开机预热（playbook ⑤）
-    warmup = getattr(app["tts"], "warmup", None)
-    if warmup is not None:
-        try:
-            await warmup("嗯。")
-            print("[web] TTS 已预热")
-        except Exception as e:
-            print(f"[warn] TTS 预热失败：{e}")
-    # 本地 ASR 预热（模型加载 + 空解码）
-    asr_warmup = getattr(app["asr"], "warmup", None)
-    if asr_warmup is not None:
-        try:
-            await asr_warmup()
-            print("[web] ASR 模型已预热")
-        except Exception as e:
-            print(f"[warn] ASR 预热失败：{e}")
+    app["pool"] = {"asr": {}, "tts": {}}
+    app["active"] = {"asr": prov.get("asr") or "volcengine",
+                     "tts": prov.get("tts") or "volcengine"}
+    app["llm"] = create_llm(cfg)
+    for slot in ("asr", "tts"):
+        await _get_provider(app, slot, app["active"][slot])   # 初始项预热
+    print(f"[web] providers: asr={app['active']['asr']} llm={prov.get('llm')} "
+          f"tts={app['active']['tts']}（页面开关可实时切换）")
 
 
 async def on_cleanup(app: web.Application) -> None:
-    for key in ("asr", "llm", "tts"):
-        close = getattr(app.get(key), "close", None)
+    providers = [app.get("llm")]
+    for slot_pool in (app.get("pool") or {}).values():
+        providers.extend(slot_pool.values())
+    for p in providers:
+        close = getattr(p, "close", None)
         if close is not None:
             try:
                 await close()
@@ -141,6 +219,8 @@ def main(argv=None) -> int:
     app.router.add_get("/pcm-worklet.js",
                        lambda r: web.FileResponse(WEB_DIR / "pcm-worklet.js"))
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/api/providers", api_get_providers)
+    app.router.add_post("/api/providers", api_set_providers)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
 
