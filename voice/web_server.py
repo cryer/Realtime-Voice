@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import ssl
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -207,6 +208,9 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default="configs/default.json")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=6789)
+    ap.add_argument("--https-port", type=int, default=6790)
+    ap.add_argument("--ssl-cert", default="certs/cert.pem")
+    ap.add_argument("--ssl-key", default="certs/key.pem")
     ap.add_argument("--out", default="reports")
     ap.add_argument("--asr", help="覆盖 config 的 ASR provider（sherpa=本地）")
     ap.add_argument("--llm", help="覆盖 config 的 LLM provider")
@@ -232,9 +236,29 @@ def main(argv=None) -> int:
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
 
-    print(f"[web] 打开 http://localhost:{args.port} 拨通电话"
-          f"（局域网 http://<本机IP>:{args.port}；getUserMedia 仅 localhost/HTTPS 可用）")
-    web.run_app(app, host=args.host, port=args.port, print=None)
+    async def _serve() -> None:
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, args.host, args.port).start()
+        print(f"[web] HTTP : http://localhost:{args.port}"
+              f"（本机/局域网调试；getUserMedia 仅 localhost 可用）")
+        cert, key = Path(args.ssl_cert), Path(args.ssl_key)
+        if cert.exists() and key.exists():
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(str(cert), str(key))
+            await web.TCPSite(runner, args.host, args.https_port,
+                              ssl_context=ctx).start()
+            print(f"[web] HTTPS: https://<服务器IP>:{args.https_port}"
+                  f"（手机/浏览器入口；自签证书首次访问需点「继续前往」）")
+        else:
+            print(f"[web] 未找到 {cert}，HTTPS 未启用；"
+                  f"手机浏览器要麦克风请先运行 deploy/gen_cert.sh <服务器IP>")
+        await asyncio.Event().wait()   # 常驻
+
+    try:
+        asyncio.run(_serve())
+    except KeyboardInterrupt:
+        pass
     return 0
 
 

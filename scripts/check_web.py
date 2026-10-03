@@ -49,7 +49,15 @@ async def main() -> int:
     eos = 0
     errors: list[str] = []
 
-    async with websockets.connect(args.url, max_size=None) as ws:
+    kwargs: dict = {}
+    if args.url.startswith("wss://"):   # 自签证书：测试客户端跳过校验
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        kwargs["ssl"] = ctx
+
+    async with websockets.connect(args.url, max_size=None, **kwargs) as ws:
         async def produce():
             t0 = time.monotonic()
             for i, f in enumerate(frames):
