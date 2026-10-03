@@ -68,25 +68,19 @@ async def amain(args) -> None:
     asr, llm, tts = create_asr(cfg), create_llm(cfg), create_tts(cfg)
     player = _make_player(args)
 
-    # M4 playbook ①+⑤：filler 占位音频开机预合成（顺带预热 TTS TLS/音色）
-    filler_pcm = None
-    filler_cfg = cfg.get("filler", {})
-    if filler_cfg.get("enabled"):
-        warmup = getattr(tts, "warmup", None)
-        if warmup is not None:
-            try:
-                filler_pcm = await warmup(filler_cfg.get("text", "嗯，好的。"))
-            except Exception as e:
-                print(f"[warn] TTS 预热/filler 合成失败：{e}")
-        if filler_pcm:
-            print(f"[M4] filler 已预合成（{len(filler_pcm) // 32}ms），"
-                  f"TTS 连接已预热")
-        else:
-            print("[M4] filler 不可用（provider 无 warmup 或合成失败），禁用")
+    # M4 playbook ⑤：TTS 开机预热（TLS 连接 + 音色/模型），预热文本合成后丢弃。
+    # （filler 占位快车道曾在 M4 实现，真人验收后按用户决定移除——每轮播
+    #   占位音太机械；保留预热因为它无侵入且改善首轮真实 TTS 延迟。）
+    warmup = getattr(tts, "warmup", None)
+    if warmup is not None:
+        try:
+            await warmup("嗯。")
+            print("[M4] TTS 连接/音色已预热")
+        except Exception as e:
+            print(f"[warn] TTS 预热失败：{e}")
 
     tm = TurnManager(vad=vad, asr=asr, llm=llm, tts=tts, player=player,
-                     cfg=cfg, system_prompt=cfg.get("system_prompt", SYSTEM_PROMPT),
-                     filler_pcm=filler_pcm)
+                     cfg=cfg, system_prompt=cfg.get("system_prompt", SYSTEM_PROMPT))
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     jsonl_path = Path(args.out) / f"m2_{stamp}.jsonl"

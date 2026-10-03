@@ -13,9 +13,6 @@
   player.flush()、gen_id 作废；已说出的半句带"被打断"标记留在对话上下文；
 - endpoint 切早（PROCESSING 中用户继续说话）：中止在途管线，已识别文本 stash，
   拼接到下一回合；
-- M4 首句快车道（playbook ①）：filler_pcm（开机预合成的短确认音频）在管线
-  启动时立即喂 player 占位，掩住 LLM TTFT；filler 开播即进 AGENT_SPEAKING，
-  打断走正常 barge-in 路径；
 - M4 endpoint 自适应（playbook ④）：VAD 用短 endpoint（如 300ms），speech_end
   时 ASR 文本"看着没说完"（过短或结尾是延续标点）则延展等待，用户继续说话
   就接着听（capture 不关，无缝），超时才真正切轮；
@@ -32,7 +29,6 @@ from typing import AsyncIterator
 
 from voice.llm.splitter import split_sentences
 from voice.metrics import MetricsSink, render_turn_waterfall
-from voice.tts.base import AudioChunk
 from voice.vad import SileroVAD, VADEvent
 
 IDLE = "IDLE"
@@ -60,7 +56,7 @@ class _Capture:
 
 class TurnManager:
     def __init__(self, *, vad: SileroVAD, asr, llm, tts, player,
-                 cfg: dict, system_prompt: str, filler_pcm: bytes | None = None):
+                 cfg: dict, system_prompt: str):
         self.vad = vad
         self.asr = asr
         self.llm = llm
@@ -72,7 +68,6 @@ class TurnManager:
         self.asr_catchup_ms = cfg.get("asr_catchup_ms", 400)
         self.bargein_confirm_ms = cfg.get("bargein_confirm_ms", 200)
         self.providers = cfg.get("providers")
-        self.filler_pcm = filler_pcm  # M4：开机预合成的占位音频（None=禁用）
         adaptive = cfg.get("adaptive_endpoint", {})
         self.adaptive_enabled = adaptive.get("enabled", False)
         self.endpoint_extend_ms = adaptive.get("extend_ms", 300)
@@ -318,42 +313,28 @@ class TurnManager:
         user_idx = -1
         speculative = False
         try:
-            # M4 首句快车道：filler 在文本采用【之前】立即开播——占位音不依赖
-            # 识别文本，这样采用阶段等得起 ASR 真 final（负包 finalize ~470ms），
-            # 不再为抢时间采用缺尾的 partial（endpoint 300ms 下曾截尾"人类为什么"）。
-            # filler 开播即算 agent 在说话（之后用户开口走 barge-in 确认）。
-            self.player.start_gen(gen_id)
-            if self.filler_pcm and self._gen == gen_id:
-                ts["t_filler_start"] = time.monotonic()
-                step = 3200  # 100ms 一片
-                for off in range(0, len(self.filler_pcm), step):
-                    if not await self.player.feed_chunk(AudioChunk(
-                            pcm=self.filler_pcm[off:off + step],
-                            gen_id=gen_id, seq=-1)):
-                        break
-                if self.state == PROCESSING and self._gen == gen_id:
-                    self._set_state(AGENT_SPEAKING)
-            # --- ASR 文本采用（总宽限 asr_catchup_ms，filler 已占位故等得起）---
-            # ① ASR 还在追音频尾（最近事件 <300ms）→ 先等一个更新补尾字；
-            # ② 仍无 final → 余下宽限等负包 finalize 出真 final；
-            # ③ 都超时 → 采用最新 partial（投机派发 §7.2），final 晚到修补 history。
+            # --- ASR 文本采用（实测依据见 AGENTS.md M2/M4 条目） ---
+            # endpoint 时 ASR 往往还差最后 1~2 字（尾部 partial 滞后 ~300ms），
+            # 而负包 finalize 要 ~470ms、服务端语义定稿 ~1.5s+，都等不起。
+            # 策略：最近事件很近（ASR 还在追音频尾）→ 等一个更新补足尾字；
+            # 否则立即采用现有 partial（投机派发 §7.2）；final 晚到后修补 history。
+            # （M4 曾用 filler 占位音换取"等真 final"的宽限；filler 按用户决定
+            #   移除后恢复快速采用。）
             if cap.last_kind != "final":
-                budget_s = self.asr_catchup_ms / 1000.0
-                t0 = time.monotonic()
-                if cap.last_ev_t is not None and t0 - cap.last_ev_t < 0.30:
+                if cap.last_ev_t is None:
+                    # 极短语音无任何事件：给 final 一个宽限
+                    try:
+                        await asyncio.wait_for(cap.final_event.wait(),
+                                               self.final_grace_ms / 1000.0)
+                    except asyncio.TimeoutError:
+                        pass
+                elif time.monotonic() - cap.last_ev_t < 0.20:
                     cap.new_event.clear()
                     try:
                         await asyncio.wait_for(cap.new_event.wait(),
-                                               min(0.25, budget_s))
+                                               self.asr_catchup_ms / 1000.0)
                     except asyncio.TimeoutError:
                         pass
-                if cap.last_kind != "final":
-                    remain = budget_s - (time.monotonic() - t0)
-                    if remain > 0:
-                        try:
-                            await asyncio.wait_for(cap.final_event.wait(), remain)
-                        except asyncio.TimeoutError:
-                            pass
             if cap.last_kind == "final" and cap.latest_final:
                 text = cap.latest_final.strip()
                 if cap.t_asr_final is not None:
@@ -370,14 +351,13 @@ class TurnManager:
             print(f"[turn {turn_id}] ASR{'(投机)' if speculative else ''}: {text!r}")
             if not text:
                 if self._gen == gen_id:
-                    if "t_filler_start" in ts:
-                        self.player.flush()  # 空回合（咳嗽误触发等）：撤掉占位音
                     self._set_state(IDLE)
                 return
             self.history.append({"role": "user", "content": text})
             user_idx = len(self.history) - 1
             messages = [{"role": "system", "content": self.system_prompt}] + self.history
 
+            self.player.start_gen(gen_id)
             async for chunk in self.tts.synth(
                     self._sentence_stream(messages, gen_id, ts, reply_parts, turn_id),
                     gen_id):
@@ -404,8 +384,7 @@ class TurnManager:
                 # 不进 history——空 assistant 消息会让后续请求被 400 拒绝
                 print(f"[warn] turn {turn_id} LLM 空回复，不计入对话上下文")
             print(f"[turn {turn_id}] agent: {reply!r}")
-            extra = {"user_text": text, "reply": reply, "speculative": speculative,
-                     "filler_used": "t_filler_start" in ts}
+            extra = {"user_text": text, "reply": reply, "speculative": speculative}
             if not reply:
                 extra["llm_empty"] = True
             patched = self._patch_user_text(user_idx, cap, text)
@@ -436,8 +415,7 @@ class TurnManager:
                         {"role": "assistant", "content": reply + " …（被打断）"})
                 self._emit_turn(turn_id, gen_id, ts, interrupted=True,
                                 extra={"user_text": text, "reply": reply,
-                                       "barge_in": True,
-                                       "filler_used": "t_filler_start" in ts})
+                                       "barge_in": True})
             else:
                 # PROCESSING 中被用户重说中止：弹出悬空 user 消息，文本 stash
                 text = text or (cap.latest_final or cap.latest_partial or "").strip()

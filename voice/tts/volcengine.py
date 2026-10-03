@@ -77,7 +77,7 @@ class VolcengineTTS:
 
     async def warmup(self, text: str) -> bytes | None:
         """开机预热（playbook ⑤）：合成一句短文本，暖 TLS 连接与音色/模型，
-        返回拼接好的 PCM——调用方拿去当 filler 占位音（playbook ①）。"""
+        返回拼接好的 PCM（调用方可丢弃）。"""
         async def one():
             yield text
         pcm = bytearray()

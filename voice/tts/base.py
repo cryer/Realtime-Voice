@@ -5,7 +5,7 @@
 
 可选方法（非 Protocol 必需，调用方用 getattr 探测）：
     async def warmup(text: str) -> bytes | None
-        开机预热连接/音色并返回短文本的 PCM（filler 占位音用，M4 playbook ①⑤）。
+        开机预热连接/音色（M4 playbook ⑤），返回合成的 PCM（可丢弃）。
 """
 
 from __future__ import annotations
