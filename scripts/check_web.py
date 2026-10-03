@@ -1,7 +1,7 @@
 """Web 链路回归：模拟浏览器客户端（M5w）。
 
 用法：
-    python scripts/check_web.py <wav> [--url ws://localhost:8080/ws]
+    python scripts/check_web.py <wav> [--url ws://localhost:6789/ws]
                                 [--expect-flush N] [--tail-s 12]
 
 行为与浏览器一致：realtime 上行 1024B PCM 帧；下行二进制收为 agent 音频
@@ -37,7 +37,7 @@ def read_wav_frames(path: str) -> list[bytes]:
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("wav")
-    ap.add_argument("--url", default="ws://localhost:8080/ws")
+    ap.add_argument("--url", default="ws://localhost:6789/ws")
     ap.add_argument("--expect-flush", type=int, default=0)
     ap.add_argument("--tail-s", type=float, default=12)
     ap.add_argument("--out", default="reports/web_agent_out.wav")

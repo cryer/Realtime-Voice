@@ -1,7 +1,7 @@
 """M5w Web 应用服务端：浏览器拨通即通话。
 
 用法：
-    python -m voice.web_server [--config configs/local.json] [--port 8080]
+    python -m voice.web_server [--config configs/local.json] [--port 6789]
                                [--asr sherpa|volcengine] [--tts sherpa|volcengine]
 
 - GET /            → web/index.html（通话界面：拨通/挂断 + 频率波纹）
@@ -206,7 +206,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m voice.web_server")
     ap.add_argument("--config", default="configs/default.json")
     ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--port", type=int, default=6789)
     ap.add_argument("--out", default="reports")
     ap.add_argument("--asr", help="覆盖 config 的 ASR provider（sherpa=本地）")
     ap.add_argument("--llm", help="覆盖 config 的 LLM provider")
