@@ -318,26 +318,42 @@ class TurnManager:
         user_idx = -1
         speculative = False
         try:
-            # --- ASR 文本采用（实测依据见 AGENTS.md M2 条目） ---
-            # endpoint 时 ASR 往往还差最后 1~2 字（尾部 partial 滞后 ~300ms），
-            # 而负包 finalize 要 ~470ms、服务端语义定稿 ~1.5s+，都等不起。
-            # 策略：最近事件很近（ASR 还在追音频尾）→ 等一个更新补足尾字；
-            # 否则立即采用现有 partial（投机派发 §7.2）；final 晚到后修补 history。
+            # M4 首句快车道：filler 在文本采用【之前】立即开播——占位音不依赖
+            # 识别文本，这样采用阶段等得起 ASR 真 final（负包 finalize ~470ms），
+            # 不再为抢时间采用缺尾的 partial（endpoint 300ms 下曾截尾"人类为什么"）。
+            # filler 开播即算 agent 在说话（之后用户开口走 barge-in 确认）。
+            self.player.start_gen(gen_id)
+            if self.filler_pcm and self._gen == gen_id:
+                ts["t_filler_start"] = time.monotonic()
+                step = 3200  # 100ms 一片
+                for off in range(0, len(self.filler_pcm), step):
+                    if not await self.player.feed_chunk(AudioChunk(
+                            pcm=self.filler_pcm[off:off + step],
+                            gen_id=gen_id, seq=-1)):
+                        break
+                if self.state == PROCESSING and self._gen == gen_id:
+                    self._set_state(AGENT_SPEAKING)
+            # --- ASR 文本采用（总宽限 asr_catchup_ms，filler 已占位故等得起）---
+            # ① ASR 还在追音频尾（最近事件 <300ms）→ 先等一个更新补尾字；
+            # ② 仍无 final → 余下宽限等负包 finalize 出真 final；
+            # ③ 都超时 → 采用最新 partial（投机派发 §7.2），final 晚到修补 history。
             if cap.last_kind != "final":
-                if cap.last_ev_t is None:
-                    # 极短语音无任何事件：给 final 一个宽限
-                    try:
-                        await asyncio.wait_for(cap.final_event.wait(),
-                                               self.final_grace_ms / 1000.0)
-                    except asyncio.TimeoutError:
-                        pass
-                elif time.monotonic() - cap.last_ev_t < 0.20:
+                budget_s = self.asr_catchup_ms / 1000.0
+                t0 = time.monotonic()
+                if cap.last_ev_t is not None and t0 - cap.last_ev_t < 0.30:
                     cap.new_event.clear()
                     try:
                         await asyncio.wait_for(cap.new_event.wait(),
-                                               self.asr_catchup_ms / 1000.0)
+                                               min(0.25, budget_s))
                     except asyncio.TimeoutError:
                         pass
+                if cap.last_kind != "final":
+                    remain = budget_s - (time.monotonic() - t0)
+                    if remain > 0:
+                        try:
+                            await asyncio.wait_for(cap.final_event.wait(), remain)
+                        except asyncio.TimeoutError:
+                            pass
             if cap.last_kind == "final" and cap.latest_final:
                 text = cap.latest_final.strip()
                 if cap.t_asr_final is not None:
@@ -354,25 +370,14 @@ class TurnManager:
             print(f"[turn {turn_id}] ASR{'(投机)' if speculative else ''}: {text!r}")
             if not text:
                 if self._gen == gen_id:
+                    if "t_filler_start" in ts:
+                        self.player.flush()  # 空回合（咳嗽误触发等）：撤掉占位音
                     self._set_state(IDLE)
                 return
             self.history.append({"role": "user", "content": text})
             user_idx = len(self.history) - 1
             messages = [{"role": "system", "content": self.system_prompt}] + self.history
 
-            self.player.start_gen(gen_id)
-            if self.filler_pcm and self._gen == gen_id:
-                # M4 首句快车道：立即播占位音掩住 LLM TTFT；filler 开播即算
-                # agent 在说话（之后用户开口走 barge-in 确认，咳嗽不会误中止）
-                ts["t_filler_start"] = time.monotonic()
-                step = 3200  # 100ms 一片
-                for off in range(0, len(self.filler_pcm), step):
-                    if not await self.player.feed_chunk(AudioChunk(
-                            pcm=self.filler_pcm[off:off + step],
-                            gen_id=gen_id, seq=-1)):
-                        break
-                if self.state == PROCESSING and self._gen == gen_id:
-                    self._set_state(AGENT_SPEAKING)
             async for chunk in self.tts.synth(
                     self._sentence_stream(messages, gen_id, ts, reply_parts, turn_id),
                     gen_id):
@@ -392,10 +397,17 @@ class TurnManager:
             if fa is not None:
                 ts["t_playback_start"] = fa
             reply = "".join(reply_parts)
-            self.history.append({"role": "assistant", "content": reply})
+            if reply:
+                self.history.append({"role": "assistant", "content": reply})
+            else:
+                # LLM 空回复（如 kimi-for-coding 对域外请求只出 reasoning）：
+                # 不进 history——空 assistant 消息会让后续请求被 400 拒绝
+                print(f"[warn] turn {turn_id} LLM 空回复，不计入对话上下文")
             print(f"[turn {turn_id}] agent: {reply!r}")
             extra = {"user_text": text, "reply": reply, "speculative": speculative,
                      "filler_used": "t_filler_start" in ts}
+            if not reply:
+                extra["llm_empty"] = True
             patched = self._patch_user_text(user_idx, cap, text)
             if patched is not None:
                 extra["user_text_final"] = patched

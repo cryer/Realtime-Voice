@@ -45,7 +45,9 @@ class KimiLLM:
         session = await self._get_session()
         try:
             async with session.post(f"{self.base_url}/chat/completions", json=body) as resp:
-                resp.raise_for_status()
+                if resp.status != 200:
+                    detail = (await resp.text())[:300]
+                    raise RuntimeError(f"kimi HTTP {resp.status}: {detail}")
                 async for line in resp.content:
                     line = line.strip()
                     if not line.startswith(b"data: "):

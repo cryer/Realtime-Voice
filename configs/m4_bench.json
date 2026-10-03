@@ -3,7 +3,7 @@
   "frame_ms": 32,
   "endpoint_ms": 300,
   "final_grace_ms": 150,
-  "asr_catchup_ms": 400,
+  "asr_catchup_ms": 600,
   "bargein_confirm_ms": 200,
   "system_prompt": "你是一个语音助手，回答简短口语化，每次只用一句话回答，不超过三十个字。",
   "filler": {"enabled": true, "text": "嗯，好的。"},
