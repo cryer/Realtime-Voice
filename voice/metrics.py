@@ -96,6 +96,17 @@ class MetricsSink:
         self.close()
 
 
+def render_turn_waterfall(ts: dict) -> str:
+    """单 turn 的分解瀑布（相对 t_last_user_audio 的毫秒偏移）。"""
+    base = ts.get("t_last_user_audio")
+    if base is None:
+        return ""
+    keys = ["t_endpoint", "t_asr_final", "t_llm_first_token",
+            "t_first_sentence_out", "t_tts_first_chunk", "t_playback_start"]
+    parts = [f"{k[2:]}=+{(ts[k] - base) * 1000:.0f}ms" for k in keys if k in ts]
+    return " | ".join(parts)
+
+
 def percentile(sorted_vals: list[float], p: float) -> float:
     """线性插值百分位；sorted_vals 必须已排序且非空。"""
     if len(sorted_vals) == 1:

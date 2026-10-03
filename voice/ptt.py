@@ -104,13 +104,10 @@ async def _frames_from_list(frames: list[bytes]) -> AsyncIterator[bytes]:
 
 
 def _print_turn_waterfall(ts: dict) -> None:
-    base = ts.get("t_last_user_audio")
-    if base is None:
-        return
-    keys = ["t_endpoint", "t_asr_final", "t_llm_first_token",
-            "t_first_sentence_out", "t_tts_first_chunk", "t_playback_start"]
-    parts = [f"{k[2:]}=+{(ts[k]-base)*1000:.0f}ms" for k in keys if k in ts]
-    print(f"  waterfall: {' | '.join(parts)}")
+    from voice.metrics import render_turn_waterfall
+    wf = render_turn_waterfall(ts)
+    if wf:
+        print(f"  waterfall: {wf}")
 
 
 async def run_file_mode(args, cfg, sink) -> None:

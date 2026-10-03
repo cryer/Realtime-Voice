@@ -50,6 +50,7 @@ class SileroVAD:
         self._speech_run_ms = 0      # 未确认语音的累计时长
         self._silence_run_ms = 0     # 语音中的静音累计
         self._speech_start_ms = 0    # 语音段起点（含未确认阶段回推）
+        self.last_prob = 0.0         # 最近一窗的语音概率（barge-in 逐帧确认用）
 
     def _infer(self, frame: bytes) -> float:
         audio = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
@@ -66,6 +67,7 @@ class SileroVAD:
         if len(frame) != FRAME_BYTES:
             raise ValueError(f"frame must be {FRAME_BYTES} bytes, got {len(frame)}")
         prob = self._infer(frame)
+        self.last_prob = prob
         frame_ms = FRAME_SAMPLES * 1000 // 16000
         now_ms = self._samples_seen * 1000 // 16000
         self._samples_seen += FRAME_SAMPLES

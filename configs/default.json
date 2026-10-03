@@ -3,6 +3,7 @@
   "frame_ms": 32,
   "endpoint_ms": 400,
   "final_grace_ms": 150,
+  "asr_catchup_ms": 400,
   "bargein_confirm_ms": 200,
   "budget_ms": {
     "vad_endpoint": 400,

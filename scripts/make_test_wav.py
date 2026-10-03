@@ -5,10 +5,11 @@ SAPI TTS 合成两段中文语音，ffmpeg 转 16kHz，再拼上静音段：
 0.6s 静音 | 语音1 | 0.9s 静音（> endpoint 400ms，触发 speech_end）| 语音2 | 1.2s 静音
 期望：2 个 speech_start + 2 个 speech_end。
 
-用法：python scripts/make_test_wav.py [out.wav]
+用法：python scripts/make_test_wav.py [out.wav] [--gap 4.0]
 依赖：Windows SAPI（自带）+ ffmpeg（PATH 中）。
 """
 
+import argparse
 import subprocess
 import sys
 import tempfile
@@ -43,18 +44,22 @@ def tts_to_pcm16(text: str, tmpdir: str, idx: int) -> np.ndarray:
 
 
 def main() -> None:
-    out = sys.argv[1] if len(sys.argv) > 1 else "reports/test_speech.wav"
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out", nargs="?", default="reports/test_speech.wav")
+    ap.add_argument("--gap", type=float, default=0.9,
+                    help="两段语音之间的静音秒数（M2 回归用 4.0，让 agent 来得及回完第一轮）")
+    args = ap.parse_args()
     sil = lambda s: np.zeros(int(SR * s), dtype=np.int16)
     with tempfile.TemporaryDirectory() as tmpdir:
         seg1 = tts_to_pcm16(TEXTS[0], tmpdir, 0)
         seg2 = tts_to_pcm16(TEXTS[1], tmpdir, 1)
-    audio = np.concatenate([sil(0.6), seg1, sil(0.9), seg2, sil(1.2)])
-    with wave.open(out, "wb") as wf:
+    audio = np.concatenate([sil(0.6), seg1, sil(args.gap), seg2, sil(1.2)])
+    with wave.open(args.out, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(SR)
         wf.writeframes(audio.tobytes())
-    print(f"wrote {out} ({len(audio)/SR:.1f}s)")
+    print(f"wrote {args.out} ({len(audio)/SR:.1f}s, gap={args.gap}s)")
 
 
 if __name__ == "__main__":
