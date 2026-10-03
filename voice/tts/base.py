@@ -2,6 +2,10 @@
 
 输入：分句器产出的句/从句流；输出：16kHz PCM16 mono 音频 chunk 流。
 取消语义：外层 task cancel；迟到 chunk 由 gen_id 在消费侧丢弃。
+
+可选方法（非 Protocol 必需，调用方用 getattr 探测）：
+    async def warmup(text: str) -> bytes | None
+        开机预热连接/音色并返回短文本的 PCM（filler 占位音用，M4 playbook ①⑤）。
 """
 
 from __future__ import annotations

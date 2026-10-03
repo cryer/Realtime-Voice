@@ -13,6 +13,12 @@
   player.flush()、gen_id 作废；已说出的半句带"被打断"标记留在对话上下文；
 - endpoint 切早（PROCESSING 中用户继续说话）：中止在途管线，已识别文本 stash，
   拼接到下一回合；
+- M4 首句快车道（playbook ①）：filler_pcm（开机预合成的短确认音频）在管线
+  启动时立即喂 player 占位，掩住 LLM TTFT；filler 开播即进 AGENT_SPEAKING，
+  打断走正常 barge-in 路径；
+- M4 endpoint 自适应（playbook ④）：VAD 用短 endpoint（如 300ms），speech_end
+  时 ASR 文本"看着没说完"（过短或结尾是延续标点）则延展等待，用户继续说话
+  就接着听（capture 不关，无缝），超时才真正切轮；
 - 竞态铁律：一切异步产出携带 gen_id，消费侧发现过期即丢弃；取消用
   asyncio.CancelledError，资源清理在 except/finally。
 """
@@ -26,6 +32,7 @@ from typing import AsyncIterator
 
 from voice.llm.splitter import split_sentences
 from voice.metrics import MetricsSink, render_turn_waterfall
+from voice.tts.base import AudioChunk
 from voice.vad import SileroVAD, VADEvent
 
 IDLE = "IDLE"
@@ -53,7 +60,7 @@ class _Capture:
 
 class TurnManager:
     def __init__(self, *, vad: SileroVAD, asr, llm, tts, player,
-                 cfg: dict, system_prompt: str):
+                 cfg: dict, system_prompt: str, filler_pcm: bytes | None = None):
         self.vad = vad
         self.asr = asr
         self.llm = llm
@@ -65,6 +72,11 @@ class TurnManager:
         self.asr_catchup_ms = cfg.get("asr_catchup_ms", 400)
         self.bargein_confirm_ms = cfg.get("bargein_confirm_ms", 200)
         self.providers = cfg.get("providers")
+        self.filler_pcm = filler_pcm  # M4：开机预合成的占位音频（None=禁用）
+        adaptive = cfg.get("adaptive_endpoint", {})
+        self.adaptive_enabled = adaptive.get("enabled", False)
+        self.endpoint_extend_ms = adaptive.get("extend_ms", 300)
+        self.min_complete_chars = adaptive.get("min_complete_chars", 5)
 
         self.state = IDLE
         self.history: list[dict] = []
@@ -82,6 +94,8 @@ class TurnManager:
         self._pipeline_task: asyncio.Task | None = None
         self._pipeline_interrupted = False  # cancel 原因：True=barge-in，False=用户重说
         self._stashed: tuple[str, float] | None = None  # 被中止回合的文本（拼下一句）
+        self._ext_task: asyncio.Task | None = None      # 自适应 endpoint 延展计时
+        self._ext_speech_end_t = 0.0                    # 延展对应的 speech_end 时刻
 
     # ---------- 主循环 ----------
 
@@ -94,7 +108,12 @@ class TurnManager:
         ev = self.vad.flush()
         if ev is not None:
             await self._on_event(ev)
-        # 输入耗尽（文件模式）：让在途回合播完
+        # 输入耗尽（文件模式）：先让未决的 endpoint 延展落定，再让在途回合播完
+        if self._ext_task is not None and not self._ext_task.done():
+            try:
+                await self._ext_task
+            except asyncio.CancelledError:
+                pass
         if self._pipeline_task is not None and not self._pipeline_task.done():
             try:
                 await self._pipeline_task
@@ -145,6 +164,10 @@ class TurnManager:
             self._abort_pipeline()
             self._start_capture()
             self._begin_user_turn(now)
+        elif self.state == USER_SPEAKING and self._ext_task is not None:
+            # 自适应 endpoint 延展窗内用户继续说话：取消延展，capture 没关，接着听
+            self._ext_task.cancel()
+            self._ext_task = None
 
     async def _on_speech_end(self) -> None:
         now = time.monotonic()
@@ -156,9 +179,43 @@ class TurnManager:
             return
         if self.state != USER_SPEAKING:
             return
+        if self.adaptive_enabled:
+            cap = self._turn_capture
+            text = ((cap.latest_partial or cap.latest_final or "")
+                    if cap is not None else "")
+            if not self._looks_complete(text):
+                # 文本看着没说完：延展等待，用户继续说则无缝接续（capture 不关）
+                self._ext_speech_end_t = now
+                self._ext_task = asyncio.create_task(self._endpoint_extension())
+                return
+        self._finish_endpoint(now)
+
+    def _looks_complete(self, text: str) -> bool:
+        """标点/长度启发式：完整句（结尾标点或足够长）→ 短 endpoint 直接切轮。"""
+        text = (text or "").strip()
+        if not text:
+            return False
+        if text[-1] in "。！？!?…":
+            return True
+        if text[-1] in "，、；：,;:":
+            return False
+        return len(text) >= self.min_complete_chars
+
+    async def _endpoint_extension(self) -> None:
+        try:
+            await asyncio.sleep(self.endpoint_extend_ms / 1000.0)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._ext_task = None
+        if self.state == USER_SPEAKING:
+            # 延展超时用户没再说：以原 speech_end 时刻真正切轮
+            self._finish_endpoint(self._ext_speech_end_t)
+
+    def _finish_endpoint(self, speech_end_t: float) -> None:
         ts = self._ts
-        ts["t_endpoint"] = now
-        ts["t_last_user_audio"] = now - self.endpoint_ms / 1000.0
+        ts["t_endpoint"] = time.monotonic()
+        ts["t_last_user_audio"] = speech_end_t - self.endpoint_ms / 1000.0
         cap = self._turn_capture
         self._close_capture()
         self._set_state(PROCESSING)
@@ -304,6 +361,18 @@ class TurnManager:
             messages = [{"role": "system", "content": self.system_prompt}] + self.history
 
             self.player.start_gen(gen_id)
+            if self.filler_pcm and self._gen == gen_id:
+                # M4 首句快车道：立即播占位音掩住 LLM TTFT；filler 开播即算
+                # agent 在说话（之后用户开口走 barge-in 确认，咳嗽不会误中止）
+                ts["t_filler_start"] = time.monotonic()
+                step = 3200  # 100ms 一片
+                for off in range(0, len(self.filler_pcm), step):
+                    if not await self.player.feed_chunk(AudioChunk(
+                            pcm=self.filler_pcm[off:off + step],
+                            gen_id=gen_id, seq=-1)):
+                        break
+                if self.state == PROCESSING and self._gen == gen_id:
+                    self._set_state(AGENT_SPEAKING)
             async for chunk in self.tts.synth(
                     self._sentence_stream(messages, gen_id, ts, reply_parts, turn_id),
                     gen_id):
@@ -325,7 +394,8 @@ class TurnManager:
             reply = "".join(reply_parts)
             self.history.append({"role": "assistant", "content": reply})
             print(f"[turn {turn_id}] agent: {reply!r}")
-            extra = {"user_text": text, "reply": reply, "speculative": speculative}
+            extra = {"user_text": text, "reply": reply, "speculative": speculative,
+                     "filler_used": "t_filler_start" in ts}
             patched = self._patch_user_text(user_idx, cap, text)
             if patched is not None:
                 extra["user_text_final"] = patched
@@ -354,7 +424,8 @@ class TurnManager:
                         {"role": "assistant", "content": reply + " …（被打断）"})
                 self._emit_turn(turn_id, gen_id, ts, interrupted=True,
                                 extra={"user_text": text, "reply": reply,
-                                       "barge_in": True})
+                                       "barge_in": True,
+                                       "filler_used": "t_filler_start" in ts})
             else:
                 # PROCESSING 中被用户重说中止：弹出悬空 user 消息，文本 stash
                 text = text or (cap.latest_final or cap.latest_partial or "").strip()

@@ -67,8 +67,26 @@ async def amain(args) -> None:
                     min_speech_ms=vad_cfg.get("min_speech_ms", 96))
     asr, llm, tts = create_asr(cfg), create_llm(cfg), create_tts(cfg)
     player = _make_player(args)
+
+    # M4 playbook ①+⑤：filler 占位音频开机预合成（顺带预热 TTS TLS/音色）
+    filler_pcm = None
+    filler_cfg = cfg.get("filler", {})
+    if filler_cfg.get("enabled"):
+        warmup = getattr(tts, "warmup", None)
+        if warmup is not None:
+            try:
+                filler_pcm = await warmup(filler_cfg.get("text", "嗯，好的。"))
+            except Exception as e:
+                print(f"[warn] TTS 预热/filler 合成失败：{e}")
+        if filler_pcm:
+            print(f"[M4] filler 已预合成（{len(filler_pcm) // 32}ms），"
+                  f"TTS 连接已预热")
+        else:
+            print("[M4] filler 不可用（provider 无 warmup 或合成失败），禁用")
+
     tm = TurnManager(vad=vad, asr=asr, llm=llm, tts=tts, player=player,
-                     cfg=cfg, system_prompt=SYSTEM_PROMPT)
+                     cfg=cfg, system_prompt=cfg.get("system_prompt", SYSTEM_PROMPT),
+                     filler_pcm=filler_pcm)
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     jsonl_path = Path(args.out) / f"m2_{stamp}.jsonl"

@@ -103,7 +103,7 @@ def render_turn_waterfall(ts: dict) -> str:
     base = ts.get("t_last_user_audio")
     if base is None:
         return ""
-    keys = ["t_endpoint", "t_asr_final", "t_llm_first_token",
+    keys = ["t_endpoint", "t_asr_final", "t_filler_start", "t_llm_first_token",
             "t_first_sentence_out", "t_tts_first_chunk", "t_playback_start"]
     parts = [f"{k[2:]}=+{(ts[k] - base) * 1000:.0f}ms" for k in keys if k in ts]
     return " | ".join(parts)
@@ -152,6 +152,18 @@ def render_report(turns: list[dict], barge_ins: list[dict], budget: dict) -> str
     interrupted = sum(1 for t in turns if t.get("interrupted"))
     if interrupted:
         lines.append(f"interrupted turns: {interrupted}")
+    # M4 优化证据行
+    filler_n = sum(1 for t in turns if t.get("meta", {}).get("filler_used"))
+    if filler_n:
+        lines.append(f"filler 占位（首句快车道）: {filler_n}/{len(turns)} turns"
+                     f"（TOTAL 含 filler 首声；真实回答见 TOTAL_real 行）")
+    spec = [t for t in turns if t.get("meta", {}).get("speculative")]
+    if spec:
+        tf = [t["meta"]["asr_true_final_ms"] for t in spec
+              if isinstance(t.get("meta", {}).get("asr_true_final_ms"), (int, float))]
+        note = f"，真 final 平均晚到 {sum(tf)/len(tf):.0f}ms" if tf else ""
+        lines.append(f"投机派发（playbook ②）: {len(spec)}/{len(turns)} turns "
+                     f"在 ASR final 前派发 LLM{note}")
     mute_vals = [b["mute_ms"] for b in barge_ins
                  if isinstance(b.get("mute_ms"), (int, float))]
     st = _stats(mute_vals)
@@ -168,6 +180,10 @@ def render_report(turns: list[dict], barge_ins: list[dict], budget: dict) -> str
         vals = []
         for t in turns:
             ts = t.get("timestamps", {})
+            # filler 占位时 t_playback_start 早于真实 TTS 首 chunk，
+            # transport_buffer 改从 t_filler_start 起算（= prebuffer 真实耗时）
+            if name == "transport_buffer" and "t_filler_start" in ts:
+                k0 = "t_filler_start"
             if k0 in ts and k1 in ts:
                 vals.append((ts[k1] - ts[k0]) * 1000.0)
         st = _stats(vals)
@@ -193,6 +209,18 @@ def render_report(turns: list[dict], barge_ins: list[dict], budget: dict) -> str
                      f"{st['p50']:>9.1f}{st['p95']:>9.1f}{st['p99']:>9.1f}{st['mean']:>9.1f}  {ok}")
     else:
         lines.append("TOTAL               (no data)")
+    # 真实回答首 chunk（不含 filler 占位与播放缓冲）：诚实口径，filler 关掉时
+    # 应与 TOTAL 基本一致
+    reals = []
+    for t in turns:
+        ts = t.get("timestamps", {})
+        if "t_last_user_audio" in ts and "t_tts_first_chunk" in ts:
+            reals.append((ts["t_tts_first_chunk"] - ts["t_last_user_audio"]) * 1000.0)
+    st = _stats(reals)
+    if st:
+        lines.append(f"{'TOTAL_real_reply':<20}{'-':>8}"
+                     f"{st['p50']:>9.1f}{st['p95']:>9.1f}{st['p99']:>9.1f}{st['mean']:>9.1f}"
+                     f"  (真实回答首 chunk，无预算)")
     return "\n".join(lines)
 
 

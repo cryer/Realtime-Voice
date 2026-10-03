@@ -75,6 +75,16 @@ class VolcengineTTS:
                 # 取消（barge-in）或单句失败：向上抛由外层处理（M6 做降级）
                 raise
 
+    async def warmup(self, text: str) -> bytes | None:
+        """开机预热（playbook ⑤）：合成一句短文本，暖 TLS 连接与音色/模型，
+        返回拼接好的 PCM——调用方拿去当 filler 占位音（playbook ①）。"""
+        async def one():
+            yield text
+        pcm = bytearray()
+        async for chunk in self.synth(one(), -1):
+            pcm.extend(chunk.pcm)
+        return bytes(pcm) if pcm else None
+
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()
